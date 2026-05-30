@@ -1,150 +1,209 @@
 #include <iostream>
-#include <unordered_map>
 #include <vector>
-#include <thread>
-#include <mutex>
-#include <chrono>
-#include <optional>
+#include <string>
 
-template<typename T>
-class ClockSweep {
-public:
-    struct CacheRecord {
-        T key;
-        int accessFrequency;
+using namespace std;
+
+template<typename Key, typename Row>
+class BTreeHelper {
+private:
+    struct Entry {
+        Key key;
+        Row row;
     };
 
-    ClockSweep(int maxNumber)
-        : maxCacheSize(maxNumber), stopThread(false)
-    {
-        bgClockThread = std::thread(&ClockSweep::backgroundClock, this);
-    }
+    struct BTree {
+        vector<Entry> keys;
+        vector<BTree*> children;
 
-    ~ClockSweep() {
-        stopThread = true;
+        bool isLeaf = true;
+    };
 
-        if (bgClockThread.joinable()) {
-            bgClockThread.join();
-        }
-    }
+    BTree* root;
 
-    std::optional<CacheRecord> getKey(const T& key) {
-        std::lock_guard<std::mutex> lock(cacheMutex);
-
-        auto it = cache.find(key);
-
-        if (it != cache.end()) {
-            std::cout << "Key found: " << key
-                      << ", Frequency = "
-                      << it->second.accessFrequency << "\n";
-
-            return it->second;
-        }
-
-        std::cout << "Key not found\n";
-        return std::nullopt;
-    }
-
-    void putKey(const T& key) {
-        std::lock_guard<std::mutex> lock(cacheMutex);
-
-        if (cache.find(key) != cache.end()) {
-            std::cout << "Key already exists\n";
-            return;
-        }
-
-        if (cache.size() < maxCacheSize) {
-            cache[key] = {key, 5};
-
-            std::cout << "Inserted key: " << key << "\n";
-            return;
-        }
-
-        auto victimIt = cache.begin();
-
-        for (auto it = cache.begin(); it != cache.end(); ++it) {
-            if (it->second.accessFrequency < victimIt->second.accessFrequency) {
-                victimIt = it;
-            }
-        }
-
-        std::cout << "Removing key: "
-                  << victimIt->first
-                  << " with frequency "
-                  << victimIt->second.accessFrequency
-                  << "\n";
-
-        cache.erase(victimIt);
-
-        cache[key] = {key, 5};
-
-        std::cout << "Inserted key: " << key << "\n";
-    }
-
-    void printCache() {
-        std::lock_guard<std::mutex> lock(cacheMutex);
-
-        std::cout << "\nCurrent Cache:\n";
-
-        for (auto& [key, record] : cache) {
-            std::cout << "Key = "
-                      << key
-                      << ", Frequency = "
-                      << record.accessFrequency
-                      << "\n";
-        }
-
-        std::cout << "\n";
-    }
+    size_t minDegree;
+    size_t maxDegree;
+    size_t minKeys;
+    size_t maxKeys;
 
 private:
-    void backgroundClock() {
-        while (!stopThread) {
+    Entry* searchNode(BTree* node, Key key) {
+        int i = 0;
 
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        while (i < node->keys.size() && key > node->keys[i].key) {
+            i++;
+        }
 
-            std::lock_guard<std::mutex> lock(cacheMutex);
+        if (i < node->keys.size() && key == node->keys[i].key) {
+            return &node->keys[i];
+        }
 
-            for (auto& [key, record] : cache) {
+        if (node->isLeaf) {
+            return nullptr;
+        }
 
-                if (record.accessFrequency > 0) {
-                    record.accessFrequency--;
+        return searchNode(node->children[i], key);
+    }
+
+    void splitChild(BTree* parent, int childIndex) {
+        BTree* fullChild = parent->children[childIndex];
+
+        BTree* newNode = new BTree();
+        newNode->isLeaf = fullChild->isLeaf;
+
+        int t = minDegree;
+
+        Entry middleKey = fullChild->keys[t - 1];
+
+        for (int i = t; i < fullChild->keys.size(); i++) {
+            newNode->keys.push_back(fullChild->keys[i]);
+        }
+
+        fullChild->keys.resize(t - 1);
+
+        if (!fullChild->isLeaf) {
+
+            for (int i = t; i < fullChild->children.size(); i++) {
+                newNode->children.push_back(fullChild->children[i]);
+            }
+
+            fullChild->children.resize(t);
+        }
+
+        parent->children.insert(
+            parent->children.begin() + childIndex + 1,
+            newNode
+        );
+
+        parent->keys.insert(
+            parent->keys.begin() + childIndex,
+            middleKey
+        );
+    }
+
+    void insertNonFull(BTree* node, Key key, Row row) {
+        int i = node->keys.size() - 1;
+
+        if (node->isLeaf) {
+
+            Entry entry{key, row};
+
+            node->keys.push_back(entry);
+
+            while (i >= 0 && key < node->keys[i].key) {
+                node->keys[i + 1] = node->keys[i];
+                i--;
+            }
+
+            node->keys[i + 1] = entry;
+        }
+        else {
+
+            while (i >= 0 && key < node->keys[i].key) {
+                i--;
+            }
+
+            i++;
+
+            if (node->children[i]->keys.size() == maxKeys) {
+
+                splitChild(node, i);
+
+                if (key > node->keys[i].key) {
+                    i++;
                 }
             }
+
+            insertNonFull(node->children[i], key, row);
         }
     }
 
-private:
-    size_t maxCacheSize{0u};
+    void printNode(BTree* node, int level) {
 
-    std::unordered_map<T, CacheRecord> cache;
+        cout << "Level " << level << ": ";
 
-    std::thread bgClockThread;
+        for (auto& entry : node->keys) {
+            cout << entry.key << " ";
+        }
 
-    std::mutex cacheMutex;
+        cout << endl;
 
-    bool stopThread;
+        if (!node->isLeaf) {
+            for (auto child : node->children) {
+                printNode(child, level + 1);
+            }
+        }
+    }
+
+public:
+
+    BTreeHelper(size_t degree) {
+
+        root = new BTree();
+
+        minDegree = degree;
+        maxDegree = 2 * degree;
+
+        minKeys = minDegree - 1;
+        maxKeys = maxDegree - 1;
+    }
+
+    Entry* search(Key key) {
+        return searchNode(root, key);
+    }
+
+    void insert(Key key, Row row) {
+        if (search(key) != nullptr) {
+            return;
+        }
+
+        if (root->keys.size() == maxKeys) {
+            BTree* newRoot = new BTree();
+
+            newRoot->isLeaf = false;
+
+            newRoot->children.push_back(root);
+
+            splitChild(newRoot, 0);
+
+            root = newRoot;
+        }
+
+        insertNonFull(root, key, row);
+    }
+
+    void print() {
+        printNode(root, 0);
+    }
 };
 
 int main() {
 
-    ClockSweep<int> clockSweep(3);
+    BTreeHelper<int, string> tree(3);
 
-    clockSweep.putKey(10);
-    clockSweep.putKey(20);
-    clockSweep.putKey(30);
+    tree.insert(10, "A");
+    tree.insert(20, "B");
+    tree.insert(5, "C");
+    tree.insert(6, "D");
+    tree.insert(12, "E");
+    tree.insert(30, "F");
+    tree.insert(7, "G");
+    tree.insert(17, "H");
 
-    clockSweep.printCache();
+    tree.print();
 
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    auto result = tree.search(12);
 
-    clockSweep.getKey(10);
-
-    clockSweep.printCache();
-
-    clockSweep.putKey(40);
-
-    clockSweep.printCache();
+    if (result != nullptr) {
+        cout << "\nFound: "
+             << result->key
+             << " -> "
+             << result->row
+             << endl;
+    }
+    else {
+        cout << "\nKey not found" << endl;
+    }
 
     return 0;
 }
